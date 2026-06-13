@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Sparkles,
@@ -80,6 +80,7 @@ const DEFAULT_USER: UserType = {
   completedLessonsToday: [],
   completedTodayDate: null,
   dailyGoalTarget: 2,
+  dailyGoalHistory: [],
 };
 
 // Key financial glossary dictionary to teach children financial vocabulary as requested
@@ -132,6 +133,19 @@ export default function App() {
   const [activeQuizStreak, setActiveQuizStreak] = useState<number>(0);
   const [activeQuizMultiplier, setActiveQuizMultiplier] = useState<number>(1.0);
   const [quizAnsweredCorrectly, setQuizAnsweredCorrectly] = useState<boolean>(false);
+  const [goalMetFeedback, setGoalMetFeedback] = useState<boolean>(false);
+  const [goalCardTilt, setGoalCardTilt] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [showGoalInsights, setShowGoalInsights] = useState<boolean>(false);
+  const [goalThemeColor, setGoalThemeColor] = useState<string>(() => {
+    try {
+      return localStorage.getItem('goalThemeColor') || '#3b82f6';
+    } catch {
+      return '#3b82f6';
+    }
+  });
+  const [showColorPicker, setShowColorPicker] = useState<boolean>(false);
+  const longPressTimer = React.useRef<any>(null);
+  const isLongPressActive = React.useRef<boolean>(false);
 
   // Mini-Game specific States
   const [scenarioIndex, setScenarioIndex] = useState<number>(0);
@@ -145,6 +159,65 @@ export default function App() {
     return { ...translations.en, ...(translations[user.language] || {}) };
   }, [user.language]);
 
+  // Goal Insights statistics computed dynamically
+  const goalInsightsData = useMemo(() => {
+    const last7Days = [];
+    let totalLessonsThisWeek = 0;
+    let totalGoalsMetThisWeek = 0;
+
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().split('T')[0];
+      
+      const record = user.dailyGoalHistory?.find(h => h.date === dateStr);
+      
+      const isToday = i === 0;
+      let completedCount = record?.completedCount ?? 0;
+      let target = record?.target ?? user.dailyGoalTarget ?? 2;
+      let isMet = record?.isMet ?? false;
+
+      if (isToday) {
+        const todayLessonsCount = user.completedLessonsToday?.length ?? 0;
+        completedCount = todayLessonsCount;
+        target = user.dailyGoalTarget ?? 2;
+        isMet = todayLessonsCount >= target;
+      }
+
+      totalLessonsThisWeek += completedCount;
+      if (isMet) {
+        totalGoalsMetThisWeek += 1;
+      }
+
+      last7Days.push({
+        date: dateStr,
+        dayName: d.toLocaleDateString(user.language === 'en' ? 'en-US' : undefined, { weekday: 'short' }),
+        label: d.toLocaleDateString(user.language === 'en' ? 'en-US' : undefined, { day: 'numeric', month: 'short' }),
+        completedCount,
+        target,
+        isMet,
+        isToday,
+      });
+    }
+
+    const lessonXpGained = totalLessonsThisWeek * 15;
+    const lessonPointsGained = totalLessonsThisWeek * 10;
+    const goalBonusXpGained = totalGoalsMetThisWeek * 20;
+    const goalBonusPointsGained = totalGoalsMetThisWeek * 15;
+
+    return {
+      last7Days,
+      totalLessonsThisWeek,
+      totalGoalsMetThisWeek,
+      lessonXpGained,
+      lessonPointsGained,
+      goalBonusXpGained,
+      goalBonusPointsGained,
+      totalXpGained: lessonXpGained + goalBonusXpGained,
+      totalPointsGained: lessonPointsGained + goalBonusPointsGained,
+    };
+  }, [user.dailyGoalHistory, user.completedLessonsToday, user.dailyGoalTarget, user.language]);
+
   // 2. Load and Sync Local Storage & Sync with Telegram properties
   useEffect(() => {
     const todayStr = new Date().toISOString().split('T')[0];
@@ -157,6 +230,7 @@ export default function App() {
           completedLessonsToday: parsed.completedLessonsToday ?? [],
           completedTodayDate: parsed.completedTodayDate ?? todayStr,
           dailyGoalTarget: parsed.dailyGoalTarget ?? 2,
+          dailyGoalHistory: parsed.dailyGoalHistory ?? [],
         };
         // Reset daily lessons progress if date changed
         if (hydrated.completedTodayDate !== todayStr) {
@@ -346,11 +420,23 @@ export default function App() {
     const goalBonusXp = reachedGoalNow ? 20 : 0;
 
     const updatedCompleted = [...user.completedLessons, lesson.id];
+
+    // Persist today's achievements state into general dailyGoalHistory
+    const todayGoalRecord = {
+      date: todayStr,
+      completedCount: updatedTodayLessons.length,
+      target: target,
+      isMet: updatedTodayLessons.length >= target
+    };
+    const updatedHistory = (user.dailyGoalHistory ?? []).filter(h => h.date !== todayStr);
+    updatedHistory.push(todayGoalRecord);
+
     const nextUser = {
       ...user,
       completedLessons: updatedCompleted,
       completedLessonsToday: updatedTodayLessons,
       completedTodayDate: todayStr,
+      dailyGoalHistory: updatedHistory,
       xp: user.xp + lesson.rewardXp + goalBonusXp,
       points: user.points + totalEarnedPoints + goalBonusPoints,
       spottyTokens: user.spottyTokens + lesson.rewardTokens,
@@ -403,11 +489,59 @@ export default function App() {
   };
 
   const handleUpdateDailyGoalTarget = (newTarget: number) => {
+    const completedToday = user.completedLessonsToday?.length ?? 0;
+    if (newTarget <= completedToday) {
+      // Trigger success feedback animation!
+      setGoalMetFeedback(true);
+      setTimeout(() => setGoalMetFeedback(false), 1200);
+      playCelebrationSound();
+
+      // Trigger localized confetti burst centered on the card
+      const element = document.getElementById('dashboard-daily-goal-card');
+      if (element) {
+        const rect = element.getBoundingClientRect();
+        const x = (rect.left + rect.width / 2) / window.innerWidth;
+        const y = (rect.top + rect.height / 2) / window.innerHeight;
+        confetti({
+          particleCount: 60,
+          spread: 70,
+          origin: { 
+            x: Math.max(0, Math.min(1, x)), 
+            y: Math.max(0, Math.min(1, y)) 
+          },
+          colors: ['#10b981', '#fbbf24', '#3b82f6', '#ec4899', '#8b5cf6'],
+        });
+      } else {
+        confetti({
+          particleCount: 60,
+          spread: 70,
+          origin: { y: 0.6 },
+          colors: ['#10b981', '#fbbf24', '#3b82f6', '#ec4899', '#8b5cf6'],
+        });
+      }
+    }
     const updated = {
       ...user,
       dailyGoalTarget: newTarget,
     };
     saveUserProgress(updated);
+  };
+
+  const handleGoalCardMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (window.matchMedia('(hover: hover)').matches) {
+      const card = e.currentTarget;
+      const rect = card.getBoundingClientRect();
+      const x = e.clientX - rect.left - rect.width / 2;
+      const y = e.clientY - rect.top - rect.height / 2;
+      // Max 6 degrees of rotation
+      const rotateX = -(y / (rect.height / 2)) * 6;
+      const rotateY = (x / (rect.width / 2)) * 6;
+      setGoalCardTilt({ x: rotateX, y: rotateY });
+    }
+  };
+
+  const handleGoalCardMouseLeave = () => {
+    setGoalCardTilt({ x: 0, y: 0 });
   };
 
   // 7. Mission reward claiming
@@ -820,15 +954,141 @@ export default function App() {
 
                 const isCompleted = completedCount >= target;
 
+                // Dynamic, mathematically resilient consecuted daily goal streak calculator
+                const currentGoalStreak = (() => {
+                  let streak = 0;
+                  const todayStr = new Date().toISOString().split('T')[0];
+                  
+                  const mockHistoryData: Record<number, boolean> = {
+                    1: true,  // Yesterday met
+                    2: true,  // 2 days ago met
+                    3: false, // 3 days ago not met
+                    4: true,  // 4 days ago met
+                    5: true,  // 5 days ago met
+                    6: false, // 6 days ago not met
+                  };
+
+                  const todayMet = completedCount >= target;
+
+                  if (todayMet) {
+                    streak = 1;
+                    let dayOffset = 1;
+                    while (true) {
+                      const d = new Date();
+                      d.setDate(d.getDate() - dayOffset);
+                      const dateStr = d.toISOString().split('T')[0];
+                      
+                      const existing = user.dailyGoalHistory?.find(h => h.date === dateStr);
+                      let dayMet = false;
+                      if (existing) {
+                        dayMet = existing.isMet;
+                      } else if (dayOffset <= 6) {
+                        dayMet = !!mockHistoryData[dayOffset];
+                      }
+
+                      if (dayMet) {
+                        streak++;
+                        dayOffset++;
+                      } else {
+                        break;
+                      }
+                    }
+                  } else {
+                    let dayOffset = 1;
+                    while (true) {
+                      const d = new Date();
+                      d.setDate(d.getDate() - dayOffset);
+                      const dateStr = d.toISOString().split('T')[0];
+                      
+                      const existing = user.dailyGoalHistory?.find(h => h.date === dateStr);
+                      let dayMet = false;
+                      if (existing) {
+                        dayMet = existing.isMet;
+                      } else if (dayOffset <= 6) {
+                        dayMet = !!mockHistoryData[dayOffset];
+                      }
+
+                      if (dayMet) {
+                        streak++;
+                        dayOffset++;
+                      } else {
+                        break;
+                      }
+                    }
+                  }
+                  return streak;
+                })();
+
                 return (
-                  <div className={`p-4 rounded-3xl border flex flex-col sm:flex-row items-center gap-4.5 min-h-[110px] relative overflow-hidden transition-all duration-300
+                  <motion.div 
+                    animate={goalMetFeedback ? { 
+                      scale: [1, 1.05, 0.96, 1.03, 1],
+                      borderColor: user.theme === 'dark'
+                        ? ["rgba(51, 65, 85, 0.6)", "rgba(16, 185, 129, 0.8)", "rgba(16, 185, 129, 0.8)", "rgba(51, 65, 85, 0.6)"]
+                        : ["rgba(241, 245, 249, 1)", "rgba(16, 185, 129, 0.8)", "rgba(16, 185, 129, 0.8)", "rgba(241, 245, 249, 1)"],
+                      rotateX: goalCardTilt.x,
+                      rotateY: goalCardTilt.y,
+                    } : isCompleted ? {
+                      scale: [1, 1.015, 1],
+                      borderColor: user.theme === 'dark'
+                        ? ["rgba(16, 185, 129, 0.3)", "rgba(16, 185, 129, 0.6)", "rgba(16, 185, 129, 0.3)"]
+                        : ["rgba(16, 185, 129, 0.2)", "rgba(16, 185, 129, 0.4)", "rgba(16, 185, 129, 0.2)"],
+                      rotateX: goalCardTilt.x,
+                      rotateY: goalCardTilt.y,
+                    } : {
+                      scale: 1,
+                      rotateX: goalCardTilt.x,
+                      rotateY: goalCardTilt.y,
+                    }}
+                    transition={goalMetFeedback ? { 
+                      duration: 0.8, 
+                      ease: "easeInOut" 
+                    } : isCompleted ? {
+                      scale: {
+                        repeat: Infinity,
+                        repeatType: "reverse",
+                        duration: 3,
+                        ease: "easeInOut"
+                      },
+                      borderColor: {
+                        repeat: Infinity,
+                        repeatType: "reverse",
+                        duration: 3,
+                        ease: "easeInOut"
+                      },
+                      rotateX: { type: "spring", stiffness: 180, damping: 20 },
+                      rotateY: { type: "spring", stiffness: 180, damping: 20 }
+                    } : { 
+                      type: "spring", 
+                      stiffness: 180, 
+                      damping: 15 
+                    }}
+                    style={{ transformStyle: "preserve-3d", perspective: 1000 }}
+                    onMouseMove={handleGoalCardMouseMove}
+                    onMouseLeave={handleGoalCardMouseLeave}
+                    onClick={() => setShowGoalInsights(true)}
+                    className={`p-4 rounded-3xl border flex flex-col sm:flex-row items-center gap-4.5 min-h-[110px] relative overflow-hidden transition-all duration-300 cursor-pointer hover:shadow-lg hover:scale-[1.015] active:scale-[0.99]
                     ${user.theme === 'dark' 
-                      ? 'bg-slate-900 border-slate-850' 
-                      : 'bg-white border-slate-100'}`}
+                      ? 'bg-slate-900 border-slate-850 hover:border-slate-700' 
+                      : 'bg-white border-slate-100 hover:border-slate-300'}`}
                     id="dashboard-daily-goal-card"
                   >
                     {isCompleted && (
                       <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 to-cyan-500/5 pointer-events-none animate-pulse" />
+                    )}
+
+                    {goalMetFeedback && (
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: [0, 1, 1, 0], scale: [0.8, 1.1, 1.1, 0.9] }}
+                        transition={{ duration: 1.2, times: [0, 0.15, 0.85, 1] }}
+                        className="absolute inset-0 bg-emerald-500/10 pointer-events-none z-20 flex items-center justify-center gap-2"
+                      >
+                        <span className="text-2xl animate-bounce">✨ 🐶 ✨</span>
+                        <span className="text-xs font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-widest bg-white dark:bg-slate-900 px-3 py-1.5 rounded-2xl shadow-md border border-emerald-500/20">
+                          Goal Maintained!
+                        </span>
+                      </motion.div>
                     )}
 
                     {/* SVG Circular Progress tracker */}
@@ -844,14 +1104,15 @@ export default function App() {
                           cy="40"
                         />
                         <motion.circle
-                          className={isCompleted ? "text-emerald-500" : "text-brand-blue"}
+                          className={isCompleted ? "text-emerald-500" : ""}
+                          style={{ stroke: isCompleted ? undefined : goalThemeColor }}
                           strokeWidth={stroke}
                           strokeDasharray={strokeCircumference}
                           initial={{ strokeDashoffset: strokeCircumference }}
                           animate={{ strokeDashoffset: offset }}
                           transition={{ duration: 0.8, ease: "easeOut" }}
                           strokeLinecap="round"
-                          stroke="currentColor"
+                          stroke={isCompleted ? "currentColor" : undefined}
                           fill="transparent"
                           r={radius}
                           cx="40"
@@ -869,7 +1130,10 @@ export default function App() {
                             🏆
                           </motion.span>
                         ) : (
-                          <span className={`text-sm font-black tracking-tight ${user.theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
+                          <span 
+                            className="text-sm font-black tracking-tight"
+                            style={{ color: goalThemeColor }}
+                          >
                             {completedCount}<span className="text-[10px] text-slate-400 font-bold mx-0.5">/</span>{target}
                           </span>
                         )}
@@ -879,30 +1143,71 @@ export default function App() {
                     {/* Goal Description Text */}
                     <div className="flex-1 text-center sm:text-left">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div className="flex items-center justify-center sm:justify-start gap-1.5">
+                        <div className="flex flex-wrap items-center justify-center sm:justify-start gap-1.5">
                           <span className="text-base">🎯</span>
                           <h4 className={`font-black text-sm ${user.theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
                             {labels.daily_lesson_goal || 'Daily Lesson Goal'}
                           </h4>
+                          
+                          {/* Streak of days badge */}
+                          <motion.div 
+                            animate={goalMetFeedback ? { scale: [1, 1.25, 1] } : {}}
+                            transition={{ duration: 0.5 }}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-[10px] font-black tracking-tight"
+                            id="daily-goal-streak-badge"
+                          >
+                            <Zap className="w-3 h-3 text-amber-500 fill-current animate-pulse" />
+                            <span>{currentGoalStreak}d Streak</span>
+                          </motion.div>
                         </div>
 
                         {/* Interactive Pill Selector to adjust goal */}
-                        <div className="flex items-center justify-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
+                        <div className="flex items-center justify-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl" onClick={(e) => e.stopPropagation()}>
                           <span className="text-[9px] font-bold text-slate-400 px-1 uppercase">{labels.goal_short || 'Goal'}:</span>
-                          {[1, 2, 3, 4].map((pillVal) => (
-                            <button
-                              key={pillVal}
-                              onClick={() => handleUpdateDailyGoalTarget(pillVal)}
-                              className={`text-[10px] font-extrabold w-5.5 h-5.5 rounded-lg flex items-center justify-center transition-all cursor-pointer
-                                ${target === pillVal
-                                  ? 'bg-brand-blue text-white shadow-xs'
-                                  : 'text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-750'
-                                }`}
-                              id={`goal-pill-${pillVal}`}
-                            >
-                              {pillVal}
-                            </button>
-                          ))}
+                          {[1, 2, 3, 4].map((pillVal) => {
+                            const handleStart = (e: React.MouseEvent | React.TouchEvent) => {
+                              isLongPressActive.current = false;
+                              if (longPressTimer.current) clearTimeout(longPressTimer.current);
+                              longPressTimer.current = setTimeout(() => {
+                                isLongPressActive.current = true;
+                                setShowColorPicker(true);
+                              }, 600);
+                            };
+                            const handleEnd = () => {
+                              if (longPressTimer.current) {
+                                clearTimeout(longPressTimer.current);
+                              }
+                            };
+                            return (
+                              <button
+                                key={pillVal}
+                                onMouseDown={handleStart}
+                                onMouseUp={handleEnd}
+                                onMouseLeave={handleEnd}
+                                onTouchStart={handleStart}
+                                onTouchEnd={handleEnd}
+                                onTouchCancel={handleEnd}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (isLongPressActive.current) {
+                                    isLongPressActive.current = false;
+                                    return;
+                                  }
+                                  handleUpdateDailyGoalTarget(pillVal);
+                                }}
+                                className={`text-[10px] font-extrabold w-5.5 h-5.5 rounded-lg flex items-center justify-center transition-all cursor-pointer select-none active:scale-95
+                                  ${target === pillVal
+                                    ? 'text-white shadow-xs'
+                                    : 'text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-750'
+                                  }`}
+                                style={target === pillVal ? { backgroundColor: goalThemeColor } : {}}
+                                title="Long-press to customize colors!"
+                                id={`goal-pill-${pillVal}`}
+                              >
+                                {pillVal}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
 
@@ -920,11 +1225,180 @@ export default function App() {
                       </p>
 
                       <div className="mt-2.5 flex items-center justify-center sm:justify-start gap-1.5">
-                        <div className="h-1.5 w-1.5 rounded-full bg-brand-green animate-ping" />
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                        <div className="relative flex h-1.5 w-1.5">
+                          <span 
+                            className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+                            style={{ backgroundColor: isCompleted ? '#10b981' : goalThemeColor }}
+                          />
+                          <span 
+                            className="relative inline-flex rounded-full h-1.5 w-1.5"
+                            style={{ backgroundColor: isCompleted ? '#10b981' : goalThemeColor }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
                           {isCompleted ? 'Superlative effort today!' : `${percentage}% Completed`}
                         </span>
                       </div>
+                    </div>
+                  </motion.div>
+                );
+              })()}
+
+              {/* Past 7 Days Goal Completion Timeline */}
+              {(() => {
+                // Generate history of the past 7 days
+                const historyList = (() => {
+                  const history: { date: string; label: string; completedCount: number; target: number; isMet: boolean; isToday: boolean }[] = [];
+                  const todayStr = new Date().toISOString().split('T')[0];
+                  
+                  // Preseed stable accomplishments so that there is some data to show
+                  const mockHistoryData: Record<number, { completedCount: number; target: number; isMet: boolean }> = {
+                    1: { completedCount: 2, target: 2, isMet: true },   // Yesterday
+                    2: { completedCount: 3, target: 2, isMet: true },   // 2 days ago
+                    3: { completedCount: 1, target: 2, isMet: false },  // 3 days ago
+                    4: { completedCount: 2, target: 2, isMet: true },   // 4 days ago
+                    5: { completedCount: 2, target: 2, isMet: true },   // 5 days ago
+                    6: { completedCount: 0, target: 2, isMet: false },  // 6 days ago
+                  };
+
+                  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+                  for (let i = 6; i >= 0; i--) {
+                    const d = new Date();
+                    d.setDate(d.getDate() - i);
+                    const dateStr = d.toISOString().split('T')[0];
+                    const dayObj = dayNames[d.getDay()];
+                    
+                    if (i === 0) {
+                      const completedToday = user.completedLessonsToday?.length ?? 0;
+                      const target = user.dailyGoalTarget ?? 2;
+                      history.push({
+                        date: dateStr,
+                        label: dayObj,
+                        completedCount: completedToday,
+                        target,
+                        isMet: completedToday >= target,
+                        isToday: true,
+                      });
+                    } else {
+                      const existing = user.dailyGoalHistory?.find(h => h.date === dateStr);
+                      if (existing) {
+                        history.push({
+                          date: dateStr,
+                          label: dayObj,
+                          completedCount: existing.completedCount,
+                          target: existing.target,
+                          isMet: existing.isMet,
+                          isToday: false,
+                        });
+                      } else {
+                        const seeded = mockHistoryData[i] || { completedCount: 0, target: 2, isMet: false };
+                        history.push({
+                          date: dateStr,
+                          label: dayObj,
+                          completedCount: seeded.completedCount,
+                          target: seeded.target,
+                          isMet: seeded.isMet,
+                          isToday: false,
+                        });
+                      }
+                    }
+                  }
+                  return history;
+                })();
+
+                const totalSuccesses = historyList.filter(h => h.isMet).length;
+
+                return (
+                  <div className={`p-4 rounded-3xl border flex flex-col gap-3.5 transition-all duration-300
+                    ${user.theme === 'dark' 
+                      ? 'bg-slate-900 border-slate-850' 
+                      : 'bg-white border-slate-100'}`}
+                    id="dashboard-goal-history-timeline"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-base text-cyan-500">📅</span>
+                        <div>
+                          <h4 className={`font-black text-sm ${user.theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
+                            {labels.goal_history_title || 'Past 7 Days History'}
+                          </h4>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                            Tracking consistency & streaks
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="px-2.5 py-1 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 rounded-xl text-[10px] font-black flex items-center gap-1">
+                        <span>🔥 {totalSuccesses}/7 Days Achieved</span>
+                      </div>
+                    </div>
+
+                    {/* Timeline Tracker strip */}
+                    <div className="grid grid-cols-7 gap-1 sm:gap-2.5 pt-2 relative">
+                      {/* Grey connector timeline line background */}
+                      <div className={`absolute top-9 left-[7%] right-[7%] h-0.5 z-0
+                        ${user.theme === 'dark' ? 'bg-slate-800' : 'bg-slate-100'}`}
+                      />
+
+                      {historyList.map((day) => {
+                        const isMet = day.isMet;
+                        const isToday = day.isToday;
+
+                        return (
+                          <div 
+                            key={day.date} 
+                            className="flex flex-col items-center gap-2 group relative z-10"
+                            id={`timeline-node-${day.date}`}
+                          >
+                            {/* Day label text */}
+                            <span className={`text-[10px] font-black tracking-tight
+                              ${isToday 
+                                ? 'text-cyan-500 dark:text-cyan-400 font-extrabold' 
+                                : user.theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}
+                            >
+                              {day.label}
+                            </span>
+
+                            {/* Circular state indicator badge with checks */}
+                            <div className={`w-8.5 h-8.5 rounded-full flex items-center justify-center border-2 transition-all duration-300 shadow-xs
+                              ${
+                                isMet
+                                  ? 'bg-emerald-500 border-emerald-400 text-white'
+                                  : isToday
+                                  ? 'bg-amber-500/10 border-amber-400 text-amber-500 animate-pulse'
+                                  : user.theme === 'dark'
+                                  ? 'bg-slate-800 border-slate-700 text-slate-500'
+                                  : 'bg-slate-50 border-slate-200 text-slate-350'
+                              }`}
+                            >
+                              {isMet ? (
+                                <span className="text-xs font-black">✓</span>
+                              ) : isToday ? (
+                                <span className="text-[10px] font-extrabold">{day.completedCount}/{day.target}</span>
+                              ) : (
+                                <span className="text-[14px] leading-none">•</span>
+                              )}
+                            </div>
+
+                            {/* Dynamic count breakdown label tooltip */}
+                            <div className="flex flex-col items-center">
+                              <span className={`text-[9px] font-extrabold tracking-tight
+                                ${isMet 
+                                  ? 'text-emerald-500' 
+                                  : user.theme === 'dark' ? 'text-slate-550' : 'text-slate-400'}`}
+                              >
+                                {isMet ? 'Done' : `${day.completedCount}/${day.target}`}
+                              </span>
+                            </div>
+
+                            {/* Real date tag showing tooltip on hover */}
+                            <div className="opacity-0 group-hover:opacity-100 pointer-events-none absolute -bottom-8 bg-slate-800 text-white text-[9px] font-black rounded-lg py-1 px-2 shadow-lg transition-all duration-200 whitespace-nowrap z-50">
+                              {day.isToday ? 'Today' : day.date}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -1901,6 +2375,288 @@ export default function App() {
               Cancel Linkage
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Goal Insights Modal */}
+      {showGoalInsights && (
+        <div className="fixed inset-0 z-55 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            transition={{ type: "spring", stiffness: 300, damping: 25 }}
+            className={`w-full max-w-md rounded-3xl p-6 border shadow-2xl relative overflow-hidden
+              ${user.theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-100 text-slate-900'}`}
+          >
+            {/* Header: Close button & Spotty custom banner */}
+            <button
+              onClick={() => setShowGoalInsights(false)}
+              className="absolute top-4 right-4 p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              aria-label="Close modal"
+            >
+              <span className="text-lg font-bold">✕</span>
+            </button>
+
+            <div className="flex flex-col items-center text-center mt-2">
+              <SpottyCharacter mood="smart" size={90} />
+              <h3 className="font-display font-black text-xl mt-3 tracking-tight flex items-center gap-1.5">
+                <span>Goal Insights</span>
+                <span className="text-xl">🎯</span>
+              </h3>
+              <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mt-1 max-w-xs leading-relaxed">
+                Consistency builds wisdom! Track your active learning patterns and complete goals for multipliers!
+              </p>
+            </div>
+
+            {/* Quick Summary Grid of Goal Rewards */}
+            <div className="grid grid-cols-2 gap-3 mt-5">
+              <div className={`p-3.5 rounded-2xl border flex flex-col justify-between
+                ${user.theme === 'dark' ? 'bg-slate-950 border-slate-805' : 'bg-amber-500/5 border-amber-500/10'}`}>
+                <div>
+                  <span className="text-[10px] uppercase font-black tracking-wider text-slate-400 block mb-1">XP This Week</span>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-black text-brand-green">{goalInsightsData.totalXpGained}</span>
+                    <span className="text-[10px] font-black text-slate-400">XP</span>
+                  </div>
+                </div>
+                <div className="mt-3.5 text-[9px] font-bold text-slate-400 dark:text-slate-500 flex flex-col gap-0.5 border-t border-slate-200 dark:border-slate-850 pt-1.5">
+                  <span className="flex justify-between"><span>Lessons Passed:</span> <span className="font-black text-slate-500 dark:text-slate-300">+{goalInsightsData.lessonXpGained} XP</span></span>
+                  <span className="flex justify-between"><span>Goal Bonuses:</span> <span className="font-black text-slate-500 dark:text-slate-300">+{goalInsightsData.goalBonusXpGained} XP</span></span>
+                </div>
+              </div>
+
+              <div className={`p-3.5 rounded-2xl border flex flex-col justify-between
+                ${user.theme === 'dark' ? 'bg-slate-950 border-slate-805' : 'bg-brand-blue/5 border-brand-blue/10'}`}>
+                <div>
+                  <span className="text-[10px] uppercase font-black tracking-wider text-slate-400 block mb-1">PTS This Week</span>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-black text-brand-blue">{goalInsightsData.totalPointsGained}</span>
+                    <span className="text-[10px] font-black text-slate-400">PTS</span>
+                  </div>
+                </div>
+                <div className="mt-3.5 text-[9px] font-bold text-slate-400 dark:text-slate-500 flex flex-col gap-0.5 border-t border-slate-200 dark:border-slate-850 pt-1.5">
+                  <span className="flex justify-between"><span>Lessons Passed:</span> <span className="font-black text-slate-500 dark:text-slate-300">+{goalInsightsData.lessonPointsGained} PTS</span></span>
+                  <span className="flex justify-between"><span>Goal Bonuses:</span> <span className="font-black text-slate-500 dark:text-slate-300">+{goalInsightsData.goalBonusPointsGained} PTS</span></span>
+                </div>
+              </div>
+            </div>
+
+            {/* Past 7 Days Progress tracker Calendar Row */}
+            <div className="mt-5">
+              <span className="text-[10px] uppercase font-black tracking-widest text-slate-400 block mb-2.5">
+                7-Day Completion Tracker
+              </span>
+              <div className="grid grid-cols-7 gap-1 text-center">
+                {goalInsightsData.last7Days.map((day) => {
+                  return (
+                    <div 
+                      key={day.date} 
+                      className={`p-1.5 rounded-xl border flex flex-col items-center justify-between text-center transition-all
+                        ${day.isToday 
+                          ? (user.theme === 'dark' ? 'bg-slate-850 border-brand-blue shadow-md' : 'bg-brand-blue/5 border-brand-blue shadow-xs') 
+                          : 'border-transparent'}`}
+                    >
+                      <span className={`text-[10px] font-bold ${day.isToday ? 'text-brand-blue font-extrabold' : 'text-slate-400'}`}>
+                        {day.dayName}
+                      </span>
+                      
+                      <div className="my-2.5 flex items-center justify-center">
+                        {day.isMet ? (
+                          <div className="w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-xs">
+                            <span className="text-xs font-black">✓</span>
+                          </div>
+                        ) : (
+                          <div className={`w-6 h-6 rounded-full flex flex-col items-center justify-center border border-dashed text-[8px] font-black
+                            ${user.theme === 'dark' 
+                              ? 'border-slate-700 bg-slate-950 text-slate-500' 
+                              : 'border-slate-200 bg-slate-50 text-slate-400'}`}
+                          >
+                            <span>{day.completedCount}</span>
+                            <span className="text-[6px] border-t border-slate-200 dark:border-slate-800 w-3 leading-none">{day.target}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <span className="text-[8px] font-semibold text-slate-400 truncate w-full flex justify-center scale-95 uppercase">
+                        {day.isToday ? 'Today' : day.label.split(' ')[0]}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Detail Performance Breakdown */}
+            <div className={`mt-5 p-3.5 rounded-2xl border flex flex-col gap-2
+              ${user.theme === 'dark' ? 'bg-slate-950 border-slate-805/40 text-slate-300' : 'bg-slate-50 border-slate-100 text-slate-600'}`}>
+              <div className="flex justify-between text-xs font-bold leading-normal">
+                <span className="flex items-center gap-1.5"><BookOpen className="text-brand-blue" size={13} /> Lessons passed:</span>
+                <span className="font-black text-slate-900 dark:text-slate-100">{goalInsightsData.totalLessonsThisWeek} passed</span>
+              </div>
+              <div className="flex justify-between text-xs font-bold leading-normal">
+                <span className="flex items-center gap-1.5"><Award className="text-amber-500" size={13} /> Daily targets completed:</span>
+                <span className="font-black text-slate-900 dark:text-slate-100">{goalInsightsData.totalGoalsMetThisWeek} days</span>
+              </div>
+              <div className="flex justify-between text-xs font-bold leading-normal">
+                <span className="flex items-center gap-1.5"><Zap className="text-amber-500" size={13} /> Active quiz speed booster:</span>
+                <span className="font-black text-slate-900 dark:text-slate-100">x{activeQuizMultiplier.toFixed(1)}</span>
+              </div>
+            </div>
+
+            {/* Spotty Friendly wise words */}
+            <div className={`mt-4 p-3 rounded-2xl border flex gap-3 text-left items-start
+              ${user.theme === 'dark' ? 'bg-emerald-500/5 border-emerald-500/10' : 'bg-green-500/5 border-green-500/10'}`}>
+              <span className="text-base mt-0.5">🐶🐾</span>
+              <div className="text-[10.5px] leading-relaxed">
+                <span className="font-black text-emerald-600 dark:text-emerald-400 block mb-0.5">Spotty says:</span>
+                <p className="font-semibold text-slate-500 dark:text-slate-400 leading-normal">
+                  {user.streak > 0 
+                    ? `Brilliant habits! You have kept a continuous ${user.streak}-day streak going. Complete tomorrow's lesson to increase your Academy double multipliers!`
+                    : "Pass simple financial tutorial quizzes daily to start your Streak! Spotty grants bonus multipliers & special digital items for consistency."}
+                </p>
+              </div>
+            </div>
+
+            {/* Action Buttons to close */}
+            <button
+              onClick={() => setShowGoalInsights(false)}
+              className="mt-5 w-full py-3 bg-brand-green hover:bg-green-600 text-white text-xs font-extrabold rounded-2xl cursor-pointer uppercase tracking-wider text-center transition-colors shadow-xs"
+            >
+              Keep learning, Spotty!
+            </button>
+          </motion.div>
+        </div>
+      )}
+ 
+      {/* Mini Color Picker Modal for Goal Card customize */}
+      {showColorPicker && (
+        <div className="fixed inset-0 z-55 bg-black/75 backdrop-blur-md flex items-center justify-center p-4">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            transition={{ type: "spring", stiffness: 300, damping: 25 }}
+            className={`w-full max-w-sm rounded-3xl p-6 border shadow-2xl relative overflow-hidden text-center
+              ${user.theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-100 text-slate-900'}`}
+          >
+            {/* Close button */}
+            <button
+              onClick={() => setShowColorPicker(false)}
+              className="absolute top-4 right-4 p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              aria-label="Close modal"
+            >
+              <span className="text-lg font-bold">✕</span>
+            </button>
+ 
+            {/* Icon / Character */}
+            <div className="flex flex-col items-center mt-2">
+              <div 
+                className="w-12 h-12 rounded-2xl flex items-center justify-center text-xl shadow-lg border animate-bounce"
+                style={{ backgroundColor: goalThemeColor, color: '#fff', borderColor: 'rgba(255,255,255,0.2)' }}
+              >
+                🎨
+              </div>
+              <h3 className="font-display font-black text-lg mt-3 tracking-tight">
+                Customize Goal Theme Color
+              </h3>
+              <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mt-1 max-w-xs leading-relaxed">
+                Choose a custom theme color for the Goal indicators, Progress rings, and target pills!
+              </p>
+            </div>
+ 
+            {/* Presets Grid */}
+            <div className="grid grid-cols-4 gap-2.5 mt-5">
+              {[
+                { hex: '#3b82f6', name: 'Classic Blue' },
+                { hex: '#10b981', name: 'Emerald' },
+                { hex: '#8b5cf6', name: 'Indigo' },
+                { hex: '#ec4899', name: 'Pink' },
+                { hex: '#f59e0b', name: 'Amber' },
+                { hex: '#ef4444', name: 'Scarlet' },
+                { hex: '#06b6d4', name: 'Cyan' },
+                { hex: '#14b8a6', name: 'Teal' },
+              ].map((clr) => (
+                <button
+                  key={clr.hex}
+                  onClick={() => {
+                    setGoalThemeColor(clr.hex);
+                    try {
+                      localStorage.setItem('goalThemeColor', clr.hex);
+                    } catch {}
+                  }}
+                  className={`group relative h-12 rounded-xl flex flex-col items-center justify-center transition-all cursor-pointer border
+                    ${goalThemeColor === clr.hex 
+                      ? 'border-white dark:border-slate-400 scale-105 shadow-md ring-2 ring-brand-blue/30' 
+                      : (user.theme === 'dark' ? 'border-slate-800 hover:border-slate-600' : 'border-slate-200 hover:border-slate-400')}`}
+                  style={{ backgroundColor: clr.hex }}
+                  title={clr.name}
+                >
+                  {goalThemeColor === clr.hex && (
+                    <span className="text-white text-xs font-black drop-shadow-md">✓</span>
+                  )}
+                  <span className="sr-only">{clr.name}</span>
+                </button>
+              ))}
+            </div>
+ 
+            {/* Custom hex input */}
+            <div className="mt-4 flex flex-col items-stretch text-left">
+              <label className="text-[10px] uppercase font-black tracking-widest text-slate-400 block mb-1.5 ml-1">
+                Custom HEX Color
+              </label>
+              <div className="flex gap-2">
+                <div 
+                  className="w-10 h-10 rounded-xl border flex-shrink-0 animate-pulse"
+                  style={{ backgroundColor: goalThemeColor }}
+                />
+                <input
+                  type="text"
+                  value={goalThemeColor}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setGoalThemeColor(val);
+                    if (val.match(/^#[0-9A-Fa-f]{6}$/)) {
+                      try {
+                        localStorage.setItem('goalThemeColor', val);
+                      } catch {}
+                    }
+                  }}
+                  placeholder="#3b82f6"
+                  maxLength={7}
+                  className={`flex-1 px-3 text-xs font-extrabold rounded-xl border outline-none font-mono
+                    ${user.theme === 'dark' 
+                      ? 'bg-slate-950 border-slate-850 text-white focus:border-slate-600' 
+                      : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-slate-400'}`}
+                />
+              </div>
+            </div>
+ 
+            {/* Action buttons */}
+            <div className="mt-6 flex flex-col gap-2">
+              <button
+                onClick={() => setShowColorPicker(false)}
+                className="w-full py-3 bg-brand-blue hover:scale-[1.01] active:scale-[0.99] text-white text-xs font-extrabold rounded-2xl cursor-pointer uppercase tracking-wider text-center transition-transform shadow-md"
+                style={{ backgroundColor: goalThemeColor }}
+              >
+                Apply Custom Theme
+              </button>
+              
+              <button
+                onClick={() => {
+                  setGoalThemeColor('#3b82f6');
+                  try {
+                    localStorage.removeItem('goalThemeColor');
+                  } catch {}
+                  setShowColorPicker(false);
+                }}
+                className={`w-full py-2.5 text-[10px] font-extrabold rounded-2xl cursor-pointer uppercase tracking-wider text-center transition-colors
+                  ${user.theme === 'dark' ? 'bg-slate-850 hover:bg-slate-800 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 text-slate-500'}`}
+              >
+                Reset to Default Theme
+              </button>
+            </div>
+          </motion.div>
         </div>
       )}
 

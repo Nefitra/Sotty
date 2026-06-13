@@ -40,6 +40,7 @@ export interface User {
   completedLessonsToday?: string[]; // list of lesson IDs completed on the current day
   completedTodayDate?: string | null; // YYYY-MM-DD
   dailyGoalTarget?: number; // target lessons count per day, e.g., 2
+  dailyGoalHistory?: { date: string; completedCount: number; target: number; isMet: boolean; }[];
 }
 
 export interface LessonBlock {
