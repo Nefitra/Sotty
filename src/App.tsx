@@ -29,6 +29,7 @@ import {
 
 // Custom reusable components
 import SpottyCharacter from './components/SpottyCharacter';
+import SpottyAssistant from './components/SpottyAssistant';
 import BalanceDisplay from './components/BalanceDisplay';
 import LessonCard from './components/LessonCard';
 import MissionCard from './components/MissionCard';
@@ -144,6 +145,13 @@ export default function App() {
     }
   });
   const [showColorPicker, setShowColorPicker] = useState<boolean>(false);
+  const [simulateLateHour, setSimulateLateHour] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('simulateLateHour') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const longPressTimer = React.useRef<any>(null);
   const isLongPressActive = React.useRef<boolean>(false);
 
@@ -953,6 +961,7 @@ export default function App() {
                 const offset = strokeCircumference - (percentage / 100) * strokeCircumference;
 
                 const isCompleted = completedCount >= target;
+                const showReminder = !isCompleted && (simulateLateHour || new Date().getHours() >= 20);
 
                 // Dynamic, mathematically resilient consecuted daily goal streak calculator
                 const currentGoalStreak = (() => {
@@ -1093,7 +1102,21 @@ export default function App() {
 
                     {/* SVG Circular Progress tracker */}
                     <div className="relative flex-shrink-0 flex items-center justify-center">
-                      <svg className="w-20 h-20 transform -rotate-90">
+                      <svg className="w-20 h-20 transform -rotate-90 overflow-visible">
+                        {showReminder && (
+                          <motion.circle
+                            animate={{ opacity: [0.3, 0.9, 0.3], scale: [0.97, 1.05, 0.97] }}
+                            transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+                            className="text-rose-500/70 dark:text-rose-400/70 origin-center"
+                            strokeWidth={1.5}
+                            strokeDasharray="4 3"
+                            stroke="currentColor"
+                            fill="transparent"
+                            r={radius + 4.5}
+                            cx="40"
+                            cy="40"
+                          />
+                        )}
                         <circle
                           className={user.theme === 'dark' ? 'text-slate-800' : 'text-slate-100'}
                           strokeWidth={stroke}
@@ -1119,6 +1142,19 @@ export default function App() {
                           cy="40"
                         />
                       </svg>
+                      {showReminder && (
+                        <motion.span
+                          initial={{ scale: 0, opacity: 0 }}
+                          animate={{ scale: [1, 1.15, 1], opacity: 1 }}
+                          transition={{
+                            scale: { repeat: Infinity, duration: 2, ease: "easeInOut" }
+                          }}
+                          className="absolute -top-1.5 -right-1.5 z-10 bg-rose-500 border border-white dark:border-slate-900 rounded-full w-5.5 h-5.5 flex items-center justify-center shadow-lg text-[10px]"
+                          title="Daily goal pending! Day ends soon (8 PM Reminder)"
+                        >
+                          ⏰
+                        </motion.span>
+                      )}
                       {/* Interactive Center Indicator */}
                       <div className="absolute flex flex-col items-center justify-center">
                         {isCompleted ? (
@@ -1223,6 +1259,13 @@ export default function App() {
                           </span>
                         )}
                       </p>
+
+                      {showReminder && (
+                        <div className="mt-2 p-1.5 px-2 bg-rose-500/10 border border-rose-500/25 text-rose-600 dark:text-rose-400 rounded-xl text-[10px] font-bold flex items-center gap-1.5">
+                          <span className="animate-bounce">🔔</span>
+                          <span><strong>Late Reminder:</strong> Day ends soon (past 8 PM)! Finish your daily goal to secure your current streak!</span>
+                        </div>
+                      )}
 
                       <div className="mt-2.5 flex items-center justify-center sm:justify-start gap-1.5">
                         <div className="relative flex h-1.5 w-1.5">
@@ -2632,6 +2675,33 @@ export default function App() {
               </div>
             </div>
  
+            {/* Simulation toggle for 8 PM reminder testing */}
+            <div className={`mt-5 p-3 rounded-2xl border text-left flex items-center justify-between
+              ${user.theme === 'dark' ? 'bg-slate-950/60 border-slate-850/60' : 'bg-slate-50 border-slate-205'}`}>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[9px] font-black uppercase tracking-widest text-rose-500 dark:text-rose-400">⏰ Testing & QA Utility</span>
+                <span className={`text-[10.5px] font-extrabold ${user.theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>Force After 8 PM Reminder</span>
+                <span className="text-[9px] text-slate-400 font-semibold">Toggles reminder ring & alert message</span>
+              </div>
+              <button
+                onClick={() => {
+                  const nextVal = !simulateLateHour;
+                  setSimulateLateHour(nextVal);
+                  try {
+                    localStorage.setItem('simulateLateHour', String(nextVal));
+                  } catch {}
+                }}
+                className={`relative inline-flex h-5 w-9.5 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out align-middle
+                  ${simulateLateHour ? 'bg-rose-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+                aria-label="Toggle simulation of late hour reminder"
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out
+                    ${simulateLateHour ? 'translate-x-4.5' : 'translate-x-0'}`}
+                />
+              </button>
+            </div>
+ 
             {/* Action buttons */}
             <div className="mt-6 flex flex-col gap-2">
               <button
@@ -2671,6 +2741,18 @@ export default function App() {
               }}
               language={user.language}
               theme={user.theme}
+            />
+          )}
+
+          {/* Persistent interactive Virtual Spotty Live Assistant */}
+          {activeTab !== 'welcome' && (
+            <SpottyAssistant
+              user={user}
+              updateUserScore={(updates) => {
+                const updatedUser = { ...user, ...updates };
+                saveUserProgress(updatedUser);
+              }}
+              activeTab={activeTab}
             />
           )}
 
