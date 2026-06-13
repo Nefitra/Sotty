@@ -1,0 +1,6 @@
+{
+  "name": "Spotty",
+  "description": "A gamified financial literacy learning app for children and beginners with friendly chat, interactive quizzes, and rewarding habit tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
