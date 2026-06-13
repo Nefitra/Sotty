@@ -46,6 +46,10 @@ export const translations: Record<LanguageCode, Record<string, string>> = {
     connect_wallet: 'Connect TON Wallet',
     wallet_connected: 'Connected Wallet',
     ton_connect_desc: 'Connect your secure Telegram TON Wallet to unlock futures rewards and export milestones.',
+    daily_lesson_goal: 'Daily Lesson Goal',
+    goal_short: 'Goal',
+    daily_goal_complete: 'Objective reached! You got extra +20 XP & +15 PTS! Spotty says yay!',
+    daily_goal_prompt: 'You\'re on track! Read and correct quizzes for {{count}} more lessons to hit today\'s objective.',
 
     // Lessons General
     basics: 'Money Basics',

@@ -37,6 +37,9 @@ export interface User {
   isTonConnected: boolean;
   tonWalletAddress: string | null;
   learnedWords: string[]; // list of financial words discovered
+  completedLessonsToday?: string[]; // list of lesson IDs completed on the current day
+  completedTodayDate?: string | null; // YYYY-MM-DD
+  dailyGoalTarget?: number; // target lessons count per day, e.g., 2
 }
 
 export interface LessonBlock {

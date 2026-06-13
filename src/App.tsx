@@ -37,6 +37,7 @@ import BottomNavigation, { TabType } from './components/BottomNavigation';
 import LanguageSwitcher from './components/LanguageSwitcher';
 import QuizComponent from './components/QuizComponent';
 import RewardEffects from './components/RewardEffects';
+import confetti from 'canvas-confetti';
 import {
   playCelebrationSound,
   playCoinDropSound,
@@ -76,6 +77,9 @@ const DEFAULT_USER: UserType = {
   isTonConnected: false,
   tonWalletAddress: null,
   learnedWords: [],
+  completedLessonsToday: [],
+  completedTodayDate: null,
+  dailyGoalTarget: 2,
 };
 
 // Key financial glossary dictionary to teach children financial vocabulary as requested
@@ -124,6 +128,11 @@ export default function App() {
   const [copyFeedback, setCopyFeedback] = useState<boolean>(false);
   const [rewardToast, setRewardToast] = useState<string | null>(null);
 
+  // Quiz Streak / Multiplier States
+  const [activeQuizStreak, setActiveQuizStreak] = useState<number>(0);
+  const [activeQuizMultiplier, setActiveQuizMultiplier] = useState<number>(1.0);
+  const [quizAnsweredCorrectly, setQuizAnsweredCorrectly] = useState<boolean>(false);
+
   // Mini-Game specific States
   const [scenarioIndex, setScenarioIndex] = useState<number>(0);
   const [gameStreak, setGameStreak] = useState<number>(0);
@@ -138,15 +147,35 @@ export default function App() {
 
   // 2. Load and Sync Local Storage & Sync with Telegram properties
   useEffect(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
     try {
       const saved = localStorage.getItem('spotty_user_progress');
       if (saved) {
         const parsed = JSON.parse(saved);
-        setUser(parsed);
+        const hydrated = {
+          ...parsed,
+          completedLessonsToday: parsed.completedLessonsToday ?? [],
+          completedTodayDate: parsed.completedTodayDate ?? todayStr,
+          dailyGoalTarget: parsed.dailyGoalTarget ?? 2,
+        };
+        // Reset daily lessons progress if date changed
+        if (hydrated.completedTodayDate !== todayStr) {
+          hydrated.completedLessonsToday = [];
+          hydrated.completedTodayDate = todayStr;
+        }
+        setUser(hydrated);
         // If they already completed welcome, go straight to dashboard
-        if (parsed.completedLessons?.length > 0 || parsed.xp > DEFAULT_USER.xp) {
+        if (hydrated.completedLessons?.length > 0 || hydrated.xp > DEFAULT_USER.xp) {
           setActiveTab('dashboard');
         }
+      } else {
+        // Set correctly initialized date tags for new users
+        setUser((prev) => ({
+          ...prev,
+          completedLessonsToday: [],
+          completedTodayDate: todayStr,
+          dailyGoalTarget: 2,
+        }));
       }
     } catch (e) {
       console.warn('Could not read from local storage', e);
@@ -289,6 +318,9 @@ export default function App() {
   // 6. Lesson view handlers
   const handleStartLesson = (lessonId: string) => {
     setCurrentLessonId(lessonId);
+    setQuizAnsweredCorrectly(false);
+    setActiveQuizMultiplier(1.0);
+    setActiveQuizStreak(0);
   };
 
   const handleLessonPassed = (lesson: Lesson) => {
@@ -298,12 +330,29 @@ export default function App() {
       return;
     }
 
+    const multiplier = activeQuizMultiplier || 1.0;
+    const bonusPoints = Math.round(lesson.rewardPoints * (multiplier - 1.0));
+    const totalEarnedPoints = lesson.rewardPoints + bonusPoints;
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const todayLessons = user.completedLessonsToday ?? [];
+    const updatedTodayLessons = todayLessons.includes(lesson.id)
+      ? todayLessons
+      : [...todayLessons, lesson.id];
+
+    const target = user.dailyGoalTarget ?? 2;
+    const reachedGoalNow = todayLessons.length < target && updatedTodayLessons.length >= target;
+    const goalBonusPoints = reachedGoalNow ? 15 : 0;
+    const goalBonusXp = reachedGoalNow ? 20 : 0;
+
     const updatedCompleted = [...user.completedLessons, lesson.id];
     const nextUser = {
       ...user,
       completedLessons: updatedCompleted,
-      xp: user.xp + lesson.rewardXp,
-      points: user.points + lesson.rewardPoints,
+      completedLessonsToday: updatedTodayLessons,
+      completedTodayDate: todayStr,
+      xp: user.xp + lesson.rewardXp + goalBonusXp,
+      points: user.points + totalEarnedPoints + goalBonusPoints,
       spottyTokens: user.spottyTokens + lesson.rewardTokens,
     };
 
@@ -319,6 +368,16 @@ export default function App() {
     setParticleType('all');
     setParticleTriggerId(`lesson-${Date.now()}-${Math.random()}`);
 
+    if (reachedGoalNow) {
+      // Trigger canvas confetti explosion
+      confetti({
+        particleCount: 150,
+        spread: 90,
+        origin: { y: 0.5 },
+        colors: ['#10b981', '#fbbf24', '#3b82f6', '#ec4899', '#8b5cf6']
+      });
+    }
+
     // Trigger mission monitoring
     setTimeout(() => {
       // Force evaluate levels
@@ -331,9 +390,24 @@ export default function App() {
       triggerMissionAction('quiz_answered');
     }, 400);
 
-    setRewardToast(`Passed "${labels[lesson.titleKey] || lesson.titleKey}"! 🏆`);
-    setTimeout(() => setRewardToast(null), 4000);
+    let toastMsg = `Passed "${labels[lesson.titleKey] || lesson.titleKey}"! Got +${totalEarnedPoints} PTS 🏆`;
+    if (bonusPoints > 0) {
+      toastMsg = `Passed "${labels[lesson.titleKey] || lesson.titleKey}"! Got +${totalEarnedPoints} PTS (+${bonusPoints} Streak Bonus Multiplier of ${multiplier.toFixed(2)}x) 🏆🔥`;
+    }
+    if (reachedGoalNow) {
+      toastMsg += ` 🎯 DAILY LEARNING GOAL ACHIEVED! Spotty rewarded you with +20 XP & +15 PTS! 🎉🐶`;
+    }
+    setRewardToast(toastMsg);
+    setTimeout(() => setRewardToast(null), 4500);
     setCurrentLessonId(null);
+  };
+
+  const handleUpdateDailyGoalTarget = (newTarget: number) => {
+    const updated = {
+      ...user,
+      dailyGoalTarget: newTarget,
+    };
+    saveUserProgress(updated);
   };
 
   // 7. Mission reward claiming
@@ -732,6 +806,130 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Daily Goal circular progress tracker */}
+              {(() => {
+                const target = user.dailyGoalTarget ?? 2;
+                const completedTodayList = user.completedLessonsToday ?? [];
+                const completedCount = completedTodayList.length;
+                const percentage = Math.min(100, Math.round((completedCount / target) * 100));
+
+                const radius = 28;
+                const stroke = 5;
+                const strokeCircumference = radius * 2 * Math.PI;
+                const offset = strokeCircumference - (percentage / 100) * strokeCircumference;
+
+                const isCompleted = completedCount >= target;
+
+                return (
+                  <div className={`p-4 rounded-3xl border flex flex-col sm:flex-row items-center gap-4.5 min-h-[110px] relative overflow-hidden transition-all duration-300
+                    ${user.theme === 'dark' 
+                      ? 'bg-slate-900 border-slate-850' 
+                      : 'bg-white border-slate-100'}`}
+                    id="dashboard-daily-goal-card"
+                  >
+                    {isCompleted && (
+                      <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 to-cyan-500/5 pointer-events-none animate-pulse" />
+                    )}
+
+                    {/* SVG Circular Progress tracker */}
+                    <div className="relative flex-shrink-0 flex items-center justify-center">
+                      <svg className="w-20 h-20 transform -rotate-90">
+                        <circle
+                          className={user.theme === 'dark' ? 'text-slate-800' : 'text-slate-100'}
+                          strokeWidth={stroke}
+                          stroke="currentColor"
+                          fill="transparent"
+                          r={radius}
+                          cx="40"
+                          cy="40"
+                        />
+                        <motion.circle
+                          className={isCompleted ? "text-emerald-500" : "text-brand-blue"}
+                          strokeWidth={stroke}
+                          strokeDasharray={strokeCircumference}
+                          initial={{ strokeDashoffset: strokeCircumference }}
+                          animate={{ strokeDashoffset: offset }}
+                          transition={{ duration: 0.8, ease: "easeOut" }}
+                          strokeLinecap="round"
+                          stroke="currentColor"
+                          fill="transparent"
+                          r={radius}
+                          cx="40"
+                          cy="40"
+                        />
+                      </svg>
+                      {/* Interactive Center Indicator */}
+                      <div className="absolute flex flex-col items-center justify-center">
+                        {isCompleted ? (
+                          <motion.span 
+                            initial={{ scale: 0.3, rotate: -45 }}
+                            animate={{ scale: 1, rotate: 0 }}
+                            className="text-2xl"
+                          >
+                            🏆
+                          </motion.span>
+                        ) : (
+                          <span className={`text-sm font-black tracking-tight ${user.theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
+                            {completedCount}<span className="text-[10px] text-slate-400 font-bold mx-0.5">/</span>{target}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Goal Description Text */}
+                    <div className="flex-1 text-center sm:text-left">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-center justify-center sm:justify-start gap-1.5">
+                          <span className="text-base">🎯</span>
+                          <h4 className={`font-black text-sm ${user.theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
+                            {labels.daily_lesson_goal || 'Daily Lesson Goal'}
+                          </h4>
+                        </div>
+
+                        {/* Interactive Pill Selector to adjust goal */}
+                        <div className="flex items-center justify-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
+                          <span className="text-[9px] font-bold text-slate-400 px-1 uppercase">{labels.goal_short || 'Goal'}:</span>
+                          {[1, 2, 3, 4].map((pillVal) => (
+                            <button
+                              key={pillVal}
+                              onClick={() => handleUpdateDailyGoalTarget(pillVal)}
+                              className={`text-[10px] font-extrabold w-5.5 h-5.5 rounded-lg flex items-center justify-center transition-all cursor-pointer
+                                ${target === pillVal
+                                  ? 'bg-brand-blue text-white shadow-xs'
+                                  : 'text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-750'
+                                }`}
+                              id={`goal-pill-${pillVal}`}
+                            >
+                              {pillVal}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <p className={`text-xs mt-1 leading-relaxed ${user.theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
+                        {isCompleted ? (
+                          <span className="font-semibold text-emerald-600 dark:text-emerald-400 block animate-bounce mt-1">
+                            ✨ {labels.daily_goal_complete || "Objective reached! You got extra +20 XP & +15 PTS! Spotty says yay!"} 🐶🎉
+                          </span>
+                        ) : (
+                          <span>
+                            {labels.daily_goal_prompt?.replace('{{count}}', String(target - completedCount)) || 
+                              `You're on track! Read and correct quizzes for ${target - completedCount} more lessons to hit today's objective.`}
+                          </span>
+                        )}
+                      </p>
+
+                      <div className="mt-2.5 flex items-center justify-center sm:justify-start gap-1.5">
+                        <div className="h-1.5 w-1.5 rounded-full bg-brand-green animate-ping" />
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                          {isCompleted ? 'Superlative effort today!' : `${percentage}% Completed`}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Mascot interactive advice panel */}
               <div className={`p-4.5 rounded-3xl border flex gap-4 items-center relative
                 ${user.theme === 'dark' ? 'bg-slate-900 border-slate-850' : 'bg-white border-slate-100'}`}
@@ -1028,19 +1226,22 @@ export default function App() {
               {/* Quiz component blocks graduation */}
               <QuizComponent
                 quiz={activeLesson.quiz}
-                onCorrectAnswer={() => {
-                  // Enable finish triggers in parent state handler
-                  // User gets XP only upon submitting correct option!
+                onCorrectAnswer={(streak, multiplier) => {
+                  setActiveQuizStreak(streak);
+                  setActiveQuizMultiplier(multiplier);
+                  setQuizAnsweredCorrectly(true);
                 }}
                 language={user.language}
                 theme={user.theme}
               />
 
               {/* Finish & Claim action panel (unlocks only after passing the quiz) */}
-              <div className={`p-4 rounded-3xl border text-center flex flex-col items-center gap-3 mt-4
+              <div className={`p-4 rounded-3xl border text-center flex flex-col items-center gap-3 mt-4 transition-all duration-300
                 ${
                   user.completedLessons.includes(activeLesson.id) 
                   ? 'border-green-200 bg-green-500/5' 
+                  : quizAnsweredCorrectly
+                  ? 'border-cyan-200 bg-cyan-500/5 ring-1 ring-cyan-400/20'
                   : user.theme === 'dark' 
                   ? 'bg-slate-900/60 border-slate-800' 
                   : 'bg-slate-50/50 border-slate-200'
@@ -1049,14 +1250,22 @@ export default function App() {
                 <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                   {user.completedLessons.includes(activeLesson.id)
                     ? (labels.reviewing_awesome || 'Reviewing is awesome! You already got the certificates.')
+                    : quizAnsweredCorrectly
+                    ? `Spotty Quiz approved! Consecutives Streak: ${activeQuizStreak} 🔥 Multiplier: ${activeQuizMultiplier.toFixed(2)}x. Claim your rewards below! 🐶✨`
                     : (labels.done_reading_hint || 'Done reading? Correctly submit the Spotty challenge quiz elements above to enable validation.')}
                 </p>
 
                 <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
+                  whileHover={(!user.completedLessons.includes(activeLesson.id) && !quizAnsweredCorrectly) ? {} : { scale: 1.02 }}
+                  whileTap={(!user.completedLessons.includes(activeLesson.id) && !quizAnsweredCorrectly) ? {} : { scale: 0.98 }}
+                  disabled={!user.completedLessons.includes(activeLesson.id) && !quizAnsweredCorrectly}
                   onClick={() => handleLessonPassed(activeLesson)}
-                  className="w-full py-3 bg-brand-green hover:bg-green-600 text-white font-black text-xs rounded-2xl cursor-pointer text-center uppercase tracking-wider transition-all"
+                  className={`w-full py-3 font-black text-xs rounded-2xl cursor-pointer text-center uppercase tracking-wider transition-all
+                    ${
+                      (!user.completedLessons.includes(activeLesson.id) && !quizAnsweredCorrectly)
+                        ? 'bg-slate-200 text-slate-400 dark:bg-slate-800 dark:text-slate-600 cursor-not-allowed border-none'
+                        : 'bg-brand-green hover:bg-green-600 text-white shadow-md shadow-emerald-500/10'
+                    }`}
                   id="final-claim-rewards-btn"
                 >
                   {user.completedLessons.includes(activeLesson.id)
